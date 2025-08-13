@@ -1,4 +1,59 @@
-target/
-dist/
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo lock file (include for applications, exclude for libraries)
+# Uncomment if this is a library
+# Cargo.lock
+
+# IDE and editor files
+.idea/
+*.swp
+*.swo
+*~
+.vscode/
+*.iml
 .DS_Store
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Google Cloud credentials
+*.json
+!package.json
+!tsconfig.json
+service-account*.json
+credentials*.json
+
+# Test output
+*.wav
+test-output/
+tmp/
+
+# Debug files
 *.log
+*.pid
+
+# OS files
+Thumbs.db
+desktop.ini
+
+# Coverage reports
+*.profraw
+*.profdata
+coverage/
+lcov.info
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Cache directories
+.cache/
+
+# Distribution directory (if used)
+dist/
