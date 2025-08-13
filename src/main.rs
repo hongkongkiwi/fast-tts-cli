@@ -13,7 +13,10 @@ enum Gender {
     Female,
 }
 
-// Only Google provider is supported for now.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum Provider {
+    Google,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "fast-tts", version, about = "Generate audio from Google Cloud Text-to-Speech")] 
@@ -68,7 +71,9 @@ struct Cli {
     #[arg(long = "config", value_name = "FILE")]
     config_path: Option<PathBuf>,
 
-    // No provider flag: Google only
+    /// TTS provider (future: more providers). Only 'google' works now.
+    #[arg(long = "provider", value_enum, default_value = "google")]
+    provider: Provider,
 
     /// List available voices and exit
     #[arg(long = "list-voices", action = ArgAction::SetTrue)]
@@ -153,7 +158,10 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Provider handling not needed: Google only
+    // Validate provider (only Google implemented for now)
+    if args.provider != Provider::Google {
+        anyhow::bail!("provider {:?} not implemented", args.provider);
+    }
 
     let text = args
         .text

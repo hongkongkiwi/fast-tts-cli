@@ -26,6 +26,7 @@ target/release/fast-tts-cli "Hello world" hello.wav
 - Options:
 ```bash
 fast-tts-cli \
+  --provider google \
   --language en-US \
   --gender female \
   --voice en-US-Neural2-F \
