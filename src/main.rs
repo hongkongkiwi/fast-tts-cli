@@ -291,6 +291,7 @@ enum Provider {
     Hume,
     Listnr,
     Murf,
+    Gemini,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -541,6 +542,15 @@ async fn main() -> Result<()> {
                 args.ssml,
                 args.timeout_ms,
                 args.retries,
+            )
+            .await?;
+        }
+        Provider::Gemini => {
+            synthesize_gemini(
+                text,
+                output,
+                args.voice.as_deref(),
+                args.encoding,
             )
             .await?;
         }
@@ -972,6 +982,104 @@ async fn synthesize_deepgram(
     let bytes = resp.bytes().await?;
     if let Some(parent) = output.parent() { if !parent.as_os_str().is_empty() { fs::create_dir_all(parent)?; } }
     fs::write(output, &bytes)?;
+    Ok(())
+}
+
+async fn synthesize_gemini(
+    text: &str,
+    output: &Path,
+    voice: Option<&str>,
+    encoding: AudioEncoding,
+) -> Result<()> {
+    let api_key = std::env::var("GEMINI_API_KEY")
+        .context("GEMINI_API_KEY is required for provider gemini")?;
+    // Allow overriding the model; default to a fast, generally-available model
+    let model = std::env::var("GEMINI_TTS_MODEL")
+        .unwrap_or_else(|_| "gemini-1.5-flash-latest".to_string());
+
+    let format = match encoding {
+        AudioEncoding::Mp3 => "mp3",
+        AudioEncoding::OggOpus => "ogg",
+        AudioEncoding::Linear16 => "wav",
+        AudioEncoding::Mulaw | AudioEncoding::Alaw => {
+            anyhow::bail!(
+                "Gemini speech does not support {} encoding; use MP3/OGG_OPUS/LINEAR16",
+                encoding.api_str()
+            )
+        }
+    };
+
+    #[derive(serde::Serialize)]
+    struct AudioPart<'a> {
+        voice: Option<&'a str>,
+        format: &'a str,
+    }
+
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+        model, api_key
+    );
+
+    // Build request payload using Gemini generateContent structure
+    let request_body = serde_json::json!({
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    { "text": text },
+                    { "audio": AudioPart { voice, format } }
+                ]
+            }
+        ]
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .header(CONTENT_TYPE, "application/json")
+        .json(&request_body)
+        .send()
+        .await?
+        .error_for_status()?;
+
+    #[derive(Deserialize)]
+    struct GeminiAudio {
+        data: String,
+        #[allow(dead_code)]
+        #[serde(rename = "mimeType")]
+        mime_type: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct GeminiPartResp {
+        #[serde(default)]
+        audio: Option<GeminiAudio>,
+        #[allow(dead_code)]
+        #[serde(default)]
+        text: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct GeminiContentResp { parts: Vec<GeminiPartResp> }
+    #[derive(Deserialize)]
+    struct GeminiCandidate { content: GeminiContentResp }
+    #[derive(Deserialize)]
+    struct GeminiResponse { candidates: Vec<GeminiCandidate> }
+
+    let gr: GeminiResponse = resp.json().await?;
+
+    // Find first audio part with data
+    let audio_b64 = gr
+        .candidates
+        .into_iter()
+        .flat_map(|c| c.content.parts)
+        .find_map(|p| p.audio.map(|a| a.data))
+        .context("Gemini response did not include audio data")?;
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(audio_b64)
+        .context("failed decoding audio data from Gemini response")?;
+
+    if let Some(parent) = output.parent() { if !parent.as_os_str().is_empty() { fs::create_dir_all(parent)?; } }
+    fs::write(output, bytes)?;
     Ok(())
 }
 

@@ -23,7 +23,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-This is a Rust CLI application for Google Cloud Text-to-Speech with a **single-file monolithic architecture** - all application logic resides in `src/main.rs`.
+This is a Rust CLI application for Text-to-Speech with a **single-file monolithic architecture** - all application logic resides in `src/main.rs`.
 
 ### Core Components
 
@@ -38,7 +38,7 @@ This is a Rust CLI application for Google Cloud Text-to-Speech with a **single-f
    - Single: CLI args → `synthesize_to_wav()` → WAV file output
    - Bulk: YAML/JSON config → `run_bulk_from_config()` → Multiple WAV files
 
-4. **API Integration**: Makes POST requests to Google TTS API, decodes base64 audio responses, writes WAV files with automatic directory creation.
+4. **API Integration**: Providers include Google Cloud TTS, Gemini Speech (Google AI), OpenAI, Azure, ElevenLabs, Deepgram (and optional Polly). Google uses JSON/`audioContent` base64; Gemini uses `generateContent` with an `audio` part.
 
 ### Key Design Patterns
 
@@ -52,6 +52,8 @@ This is a Rust CLI application for Google Cloud Text-to-Speech with a **single-f
 - `GOOGLE_APPLICATION_CREDENTIALS` - Path to service account JSON key
 - `FAST_TTS_BASE_URL` - Override API base URL (default: https://texttospeech.googleapis.com)
 - `FAST_TTS_TOKEN` - Test token for bypassing Google authentication
+- `GEMINI_API_KEY` - API key for Gemini Speech
+- `GEMINI_TTS_MODEL` - Optional model override (default: `gemini-1.5-flash-latest`)
 
 ### File Structure
 

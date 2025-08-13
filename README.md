@@ -7,15 +7,21 @@ Fast, flexible CLI for Google Cloud Text-to-Speech.
 - SSML or plaintext
 - Bulk generation from YAML/JSON configs with defaults and overrides
 - Cross-platform binaries via GitHub Releases
-- Multi-provider scaffold (currently Google only)
+- Multi-provider: Google, Gemini (Google AI), OpenAI, Azure, ElevenLabs, Deepgram (+ optional Polly)
 
 #### Install
 - Build: `cargo build --release` (binary at `target/release/fast-tts-cli`)
 - Or install: `cargo install --path .`
 
-Auth (one of):
-- `GOOGLE_APPLICATION_CREDENTIALS` -> service-account JSON
-- `gcloud auth application-default login`
+Auth / API keys:
+- Google Cloud TTS:
+  - `GOOGLE_APPLICATION_CREDENTIALS` -> service-account JSON, or
+  - `gcloud auth application-default login`
+- Gemini Speech (Google AI):
+  - `GEMINI_API_KEY` (required)
+  - Optional: `GEMINI_TTS_MODEL` (default: `gemini-1.5-flash-latest`)
+  - Note: supported encodings are MP3, OGG_OPUS, LINEAR16 (WAV)
+    - MULAW/ALAW are not supported by Gemini
 
 #### Usage
 - Basic:
@@ -37,6 +43,16 @@ fast-tts-cli \
   --volume 0.0 \
   --effects-profile wearable-class-device \
   "Hi" hi.wav
+```
+
+- Gemini (Google AI) speech generation:
+```bash
+export GEMINI_API_KEY=...  # required
+fast-tts-cli --provider gemini "Hello from Gemini" hello.mp3
+
+# Optional voice and model override
+GEMINI_TTS_MODEL=gemini-1.5-flash-latest \
+  fast-tts-cli --provider gemini --voice charlie --encoding OGG_OPUS "A short line" out.ogg
 ```
 
 - List voices:
@@ -66,6 +82,8 @@ items:
     output: ssml.mp3
 ```
 Run: `fast-tts-cli --provider google --config tts.yaml`
+
+Note: bulk mode currently uses the Google Cloud TTS path. If you need bulk for other providers, please open an issue.
 
 #### Dev
 - just: `just check` (fmt, clippy, build, test)
