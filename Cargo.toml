@@ -10,11 +10,32 @@ keywords = ["tts", "google", "cli", "audio", "wav"]
 categories = ["command-line-utilities", "multimedia::audio"]
 
 [features]
+default = [
+    "all-providers",
+]
 # Enable Model Context Protocol server support via rust-sdk
 mcp = ["dep:mcp-server", "dep:axum", "dep:mcp-spec", "dep:tokio-stream", "dep:futures", "dep:tower-service"]
 
 # Optional provider integrations
 polly = ["dep:aws-config", "dep:aws-sdk-polly"]
+
+# Provider feature-gates (all enabled by default via all-providers)
+provider-google = []
+provider-openai = []
+provider-elevenlabs = []
+provider-deepgram = []
+provider-azure = []
+provider-gemini = []
+
+# Convenience feature to turn on all providers (except optional polly)
+all-providers = [
+    "provider-google",
+    "provider-openai",
+    "provider-elevenlabs",
+    "provider-deepgram",
+    "provider-azure",
+    "provider-gemini",
+]
 
 [dependencies]
 anyhow = "1.0"

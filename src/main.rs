@@ -5,6 +5,8 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+// use std::collections::HashSet; // not currently used
 // use std::time::Duration; // reserved for future retries/timeouts
 
 #[cfg(feature = "mcp")]
@@ -14,16 +16,20 @@ mod mcp_integration {
 
     // Import rust-sdk types guarded by feature
     use ::mcp_server::{ByteTransport, Router, Server};
-    use axum::{self, response::sse::{Event, Sse}, routing::{get, post}, Json, Router as AxumRouter};
-    use tower_service::Service;
+    use axum::{
+        self, Json, Router as AxumRouter,
+        response::sse::{Event, Sse},
+        routing::{get, post},
+    };
     use mcp_spec::content::Content;
     use mcp_spec::handler::{PromptError, ResourceError, ToolError};
     use mcp_spec::prompt::{Prompt, PromptArgument};
     use mcp_spec::protocol::{JsonRpcRequest, JsonRpcResponse, ServerCapabilities};
     use std::convert::Infallible;
     use std::time::Duration;
-    use tokio_stream::StreamExt as _;
     use tokio as mcp_tokio;
+    use tokio_stream::StreamExt as _;
+    use tower_service::Service;
 
     pub async fn run_mcp_server(mode: McpMode, addr: Option<String>) -> Result<()> {
         // Build Router implementation backed by our CLI functions
@@ -36,7 +42,9 @@ mod mcp_integration {
                 server.run(transport).await?;
             }
             McpMode::Http | McpMode::Sse => {
-                async fn rpc(Json(req): Json<JsonRpcRequest>) -> Result<Json<JsonRpcResponse>, axum::http::StatusCode> {
+                async fn rpc(
+                    Json(req): Json<JsonRpcRequest>,
+                ) -> Result<Json<JsonRpcResponse>, axum::http::StatusCode> {
                     let mut service = mcp_server::router::RouterService(FastTtsRouter);
                     service
                         .call(req)
@@ -98,7 +106,8 @@ mod mcp_integration {
                             "encoding": {"type": "string"},
                             "volumeGainDb": {"type": "number"},
                             "effectsProfileId": {"type": "array", "items": {"type": "string"}},
-                            "ssml": {"type": "boolean"}
+                            "ssml": {"type": "boolean"},
+                            "play": {"type": "boolean"}
                         },
                         "required": ["text", "output"]
                     }),
@@ -182,6 +191,10 @@ mod mcp_integration {
                             .get("ssml")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
+                        let play = arguments
+                            .get("play")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
 
                         let output_path = PathBuf::from(&output);
                         let enc = super::parse_encoding_from_str(encoding)
@@ -208,6 +221,12 @@ mod mcp_integration {
                         )
                         .await
                         .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
+
+                        if play {
+                            if let Err(e) = super::play_audio(&output_path) {
+                                eprintln!("Warning: playback failed: {e}");
+                            }
+                        }
 
                         Ok(vec![Content::text(
                             serde_json::json!({"ok": true, "output": output}).to_string(),
@@ -389,6 +408,10 @@ struct Cli {
     #[arg(long = "ssml", action = ArgAction::SetTrue)]
     ssml: bool,
 
+    /// Play the output audio after synthesis
+    #[arg(long = "play", action = ArgAction::SetTrue)]
+    play: bool,
+
     /// Use config file (YAML or JSON) for bulk synthesis
     #[arg(long = "config", value_name = "FILE")]
     config_path: Option<PathBuf>,
@@ -396,6 +419,8 @@ struct Cli {
     /// TTS provider (future: more providers). Only 'google' works now.
     #[arg(long = "provider", value_enum, default_value = "google")]
     provider: Provider,
+
+    // Provider selection is compile-time via cargo features
 
     /// List available voices and exit
     #[arg(long = "list-voices", action = ArgAction::SetTrue)]
@@ -501,11 +526,16 @@ async fn main() -> Result<()> {
     }
 
     if let Some(cfg_path) = &args.config_path {
-        run_bulk_from_config(cfg_path, args.timeout_ms, args.retries).await?;
+        run_bulk_from_config(cfg_path, args.timeout_ms, args.retries, args.play).await?;
         return Ok(());
     }
 
     if args.list_voices {
+        if !provider_enabled(Provider::Google) {
+            anyhow::bail!(
+                "Google provider not enabled in this build. Rebuild with --features provider-google or all-providers"
+            );
+        }
         list_voices(args.json_output).await?;
         return Ok(());
     }
@@ -520,6 +550,14 @@ async fn main() -> Result<()> {
         .context("text and output are required unless --list-voices is used")?;
 
     validate_output_extension(output, args.encoding)?;
+
+    if !provider_enabled(args.provider) {
+        anyhow::bail!(
+            "provider {:?} not enabled in this build. Rebuild with --features {} or all-providers",
+            args.provider,
+            provider_feature_flag(args.provider)
+        );
+    }
 
     match args.provider {
         Provider::Google => {
@@ -546,13 +584,7 @@ async fn main() -> Result<()> {
             .await?;
         }
         Provider::Gemini => {
-            synthesize_gemini(
-                text,
-                output,
-                args.voice.as_deref(),
-                args.encoding,
-            )
-            .await?;
+            synthesize_gemini(text, output, args.voice.as_deref(), args.encoding).await?;
         }
         Provider::Azure => {
             synthesize_azure(
@@ -607,6 +639,11 @@ async fn main() -> Result<()> {
     }
 
     println!("Wrote {}", output.display());
+    if args.play {
+        if let Err(e) = play_audio(output) {
+            eprintln!("Warning: playback failed: {e}");
+        }
+    }
     Ok(())
 }
 
@@ -650,7 +687,17 @@ struct BulkConfig {
     items: Vec<BulkItem>,
 }
 
-async fn run_bulk_from_config(path: &PathBuf, timeout_ms: u64, retries: usize) -> Result<()> {
+async fn run_bulk_from_config(
+    path: &PathBuf,
+    timeout_ms: u64,
+    retries: usize,
+    play: bool,
+) -> Result<()> {
+    if !provider_enabled(Provider::Google) {
+        anyhow::bail!(
+            "Bulk synthesis requires Google provider. Rebuild with --features provider-google or all-providers"
+        );
+    }
     let data = fs::read_to_string(path)
         .with_context(|| format!("failed to read config: {}", path.display()))?;
     let is_yaml = path
@@ -760,6 +807,68 @@ async fn run_bulk_from_config(path: &PathBuf, timeout_ms: u64, retries: usize) -
         .await?;
 
         println!("Wrote {}", output.display());
+        if play {
+            if let Err(e) = play_audio(&output) {
+                eprintln!("Warning: playback failed for {}: {e}", output.display());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn play_audio(path: &Path) -> Result<()> {
+    // Best-effort cross-platform playback using system tools
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("non-UTF8 path not supported for playback"))?;
+
+    #[cfg(target_os = "macos")]
+    {
+        // Prefer afplay (CLI player); fall back to opening default app
+        if Command::new("afplay").arg(path_str).status().is_ok() {
+            return Ok(());
+        }
+        Command::new("open")
+            .arg(path_str)
+            .status()
+            .map(|_| ())
+            .context("failed to open audio with 'open'")?
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Try ffplay/paplay/aplay, then fall back to xdg-open
+        let try_cmds: &[(&str, &[&str])] = &[
+            ("ffplay", &["-autoexit", "-nodisp"]),
+            ("paplay", &[]),
+            ("aplay", &[]),
+        ];
+        for (bin, args) in try_cmds {
+            if Command::new(bin).args(*args).arg(path_str).status().is_ok() {
+                return Ok(());
+            }
+        }
+        Command::new("xdg-open")
+            .arg(path_str)
+            .status()
+            .map(|_| ())
+            .context("failed to open audio with 'xdg-open'")?
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Use cmd to start default associated app
+        Command::new("cmd")
+            .args(["/C", "start", "", path_str])
+            .status()
+            .map(|_| ())
+            .context("failed to open audio with 'start'")?
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        anyhow::bail!("playback not supported on this OS");
     }
 
     Ok(())
@@ -870,7 +979,11 @@ async fn synthesize_openai(
         .await?
         .error_for_status()?;
     let bytes = resp.bytes().await?;
-    if let Some(parent) = output.parent() { if !parent.as_os_str().is_empty() { fs::create_dir_all(parent)?; } }
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
     fs::write(output, &bytes)?;
     Ok(())
 }
@@ -883,8 +996,10 @@ async fn synthesize_azure(
     encoding: AudioEncoding,
     sample_rate: Option<i32>,
 ) -> Result<()> {
-    let key = std::env::var("AZURE_SPEECH_KEY").context("AZURE_SPEECH_KEY is required for provider azure")?;
-    let region = std::env::var("AZURE_SPEECH_REGION").context("AZURE_SPEECH_REGION is required for provider azure")?;
+    let key = std::env::var("AZURE_SPEECH_KEY")
+        .context("AZURE_SPEECH_KEY is required for provider azure")?;
+    let region = std::env::var("AZURE_SPEECH_REGION")
+        .context("AZURE_SPEECH_REGION is required for provider azure")?;
     let voice_name = voice.unwrap_or(match language {
         // sensible defaults by locale
         l if l.starts_with("en-US") => "en-US-JennyNeural",
@@ -895,7 +1010,9 @@ async fn synthesize_azure(
         (AudioEncoding::Mp3, Some(_)) => "audio-48khz-192kbitrate-mono-mp3".to_string(),
         (AudioEncoding::Mp3, None) => "audio-24khz-160kbitrate-mono-mp3".to_string(),
         (AudioEncoding::OggOpus, _) => "ogg-48khz-16bit-mono-opus".to_string(),
-        (AudioEncoding::Linear16, Some(sr)) if sr >= 48000 => "riff-48khz-16bit-mono-pcm".to_string(),
+        (AudioEncoding::Linear16, Some(sr)) if sr >= 48000 => {
+            "riff-48khz-16bit-mono-pcm".to_string()
+        }
         (AudioEncoding::Linear16, _) => "riff-24khz-16bit-mono-pcm".to_string(),
         (AudioEncoding::Mulaw, _) => "mulaw-8khz-8bit-mono".to_string(),
         (AudioEncoding::Alaw, _) => "alaw-8khz-8bit-mono".to_string(),
@@ -919,7 +1036,11 @@ async fn synthesize_azure(
         .await?
         .error_for_status()?;
     let bytes = resp.bytes().await?;
-    if let Some(parent) = output.parent() { if !parent.as_os_str().is_empty() { fs::create_dir_all(parent)?; } }
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
     fs::write(output, &bytes)?;
     Ok(())
 }
@@ -935,7 +1056,11 @@ async fn synthesize_elevenlabs(
         .context("ELEVENLABS_API_KEY is required for provider elevenlabs")?;
     let voice_id = voice.unwrap_or("Rachel");
     let model = model_id.unwrap_or("eleven_multilingual_v2");
-    let format = match encoding { AudioEncoding::Mp3 => "mp3", AudioEncoding::OggOpus => "ogg", _ => "wav" };
+    let format = match encoding {
+        AudioEncoding::Mp3 => "mp3",
+        AudioEncoding::OggOpus => "ogg",
+        _ => "wav",
+    };
     let url = format!("https://api.elevenlabs.io/v1/text-to-speech/{voice_id}");
     let client = reqwest::Client::new();
     let resp = client
@@ -952,7 +1077,11 @@ async fn synthesize_elevenlabs(
         .await?
         .error_for_status()?;
     let bytes = resp.bytes().await?;
-    if let Some(parent) = output.parent() { if !parent.as_os_str().is_empty() { fs::create_dir_all(parent)?; } }
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
     fs::write(output, &bytes)?;
     Ok(())
 }
@@ -968,7 +1097,11 @@ async fn synthesize_deepgram(
         .context("DEEPGRAM_API_KEY is required for provider deepgram")?;
     let model = model_id.unwrap_or("aura-asteria-en");
     let voice_name = voice.unwrap_or("aura-asteria-en");
-    let format = match encoding { AudioEncoding::Mp3 => "mp3", AudioEncoding::OggOpus => "opus", _ => "wav" };
+    let format = match encoding {
+        AudioEncoding::Mp3 => "mp3",
+        AudioEncoding::OggOpus => "opus",
+        _ => "wav",
+    };
     let url = "https://api.deepgram.com/v1/speak";
     let client = reqwest::Client::new();
     let resp = client
@@ -980,7 +1113,11 @@ async fn synthesize_deepgram(
         .await?
         .error_for_status()?;
     let bytes = resp.bytes().await?;
-    if let Some(parent) = output.parent() { if !parent.as_os_str().is_empty() { fs::create_dir_all(parent)?; } }
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
     fs::write(output, &bytes)?;
     Ok(())
 }
@@ -994,8 +1131,8 @@ async fn synthesize_gemini(
     let api_key = std::env::var("GEMINI_API_KEY")
         .context("GEMINI_API_KEY is required for provider gemini")?;
     // Allow overriding the model; default to a fast, generally-available model
-    let model = std::env::var("GEMINI_TTS_MODEL")
-        .unwrap_or_else(|_| "gemini-1.5-flash-latest".to_string());
+    let model =
+        std::env::var("GEMINI_TTS_MODEL").unwrap_or_else(|_| "gemini-1.5-flash-latest".to_string());
 
     let format = match encoding {
         AudioEncoding::Mp3 => "mp3",
@@ -1016,8 +1153,7 @@ async fn synthesize_gemini(
     }
 
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-        model, api_key
+        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     );
 
     // Build request payload using Gemini generateContent structure
@@ -1058,11 +1194,17 @@ async fn synthesize_gemini(
         text: Option<String>,
     }
     #[derive(Deserialize)]
-    struct GeminiContentResp { parts: Vec<GeminiPartResp> }
+    struct GeminiContentResp {
+        parts: Vec<GeminiPartResp>,
+    }
     #[derive(Deserialize)]
-    struct GeminiCandidate { content: GeminiContentResp }
+    struct GeminiCandidate {
+        content: GeminiContentResp,
+    }
     #[derive(Deserialize)]
-    struct GeminiResponse { candidates: Vec<GeminiCandidate> }
+    struct GeminiResponse {
+        candidates: Vec<GeminiCandidate>,
+    }
 
     let gr: GeminiResponse = resp.json().await?;
 
@@ -1078,7 +1220,11 @@ async fn synthesize_gemini(
         .decode(audio_b64)
         .context("failed decoding audio data from Gemini response")?;
 
-    if let Some(parent) = output.parent() { if !parent.as_os_str().is_empty() { fs::create_dir_all(parent)?; } }
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
     fs::write(output, bytes)?;
     Ok(())
 }
@@ -1094,7 +1240,11 @@ async fn synthesize_polly(
     let config = aws_config::load_from_env().await;
     let client = aws_sdk_polly::Client::new(&config);
     let voice_id = voice.unwrap_or("Joanna");
-    let output_format = match encoding { AudioEncoding::Mp3 => OutputFormat::Mp3, AudioEncoding::OggOpus => OutputFormat::OggVorbis, _ => OutputFormat::Pcm };
+    let output_format = match encoding {
+        AudioEncoding::Mp3 => OutputFormat::Mp3,
+        AudioEncoding::OggOpus => OutputFormat::OggVorbis,
+        _ => OutputFormat::Pcm,
+    };
     let resp = client
         .synthesize_speech()
         .set_text(Some(text.to_string()))
@@ -1103,8 +1253,16 @@ async fn synthesize_polly(
         .set_engine(Some(Engine::Neural))
         .send()
         .await?;
-    let data = resp.audio_stream.unwrap().into_bytes().collect::<Result<Vec<_>, _>>()?;
-    if let Some(parent) = output.parent() { if !parent.as_os_str().is_empty() { fs::create_dir_all(parent)?; } }
+    let data = resp
+        .audio_stream
+        .unwrap()
+        .into_bytes()
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
     fs::write(output, data)?;
     Ok(())
 }
@@ -1331,4 +1489,32 @@ fn default_adc_path() -> Option<PathBuf> {
         return Some(p);
     }
     None
+}
+
+fn provider_enabled(p: Provider) -> bool {
+    match p {
+        Provider::Google => cfg!(feature = "provider-google"),
+        Provider::Openai => cfg!(feature = "provider-openai"),
+        Provider::Elevenlabs => cfg!(feature = "provider-elevenlabs"),
+        Provider::Deepgram => cfg!(feature = "provider-deepgram"),
+        Provider::Polly => cfg!(feature = "polly"),
+        Provider::Azure => cfg!(feature = "provider-azure"),
+        Provider::Gemini => cfg!(feature = "provider-gemini"),
+        Provider::Hume | Provider::Listnr | Provider::Murf => false,
+    }
+}
+
+fn provider_feature_flag(p: Provider) -> &'static str {
+    match p {
+        Provider::Google => "provider-google",
+        Provider::Openai => "provider-openai",
+        Provider::Elevenlabs => "provider-elevenlabs",
+        Provider::Deepgram => "provider-deepgram",
+        Provider::Polly => "polly",
+        Provider::Azure => "provider-azure",
+        Provider::Gemini => "provider-gemini",
+        Provider::Hume => "provider-hume",
+        Provider::Listnr => "provider-listnr",
+        Provider::Murf => "provider-murf",
+    }
 }
