@@ -1,0 +1,42 @@
+name: CodeRabbit Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  pull_request_review_comment:
+    types: [created]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    name: CodeRabbit AI Review
+    steps:
+      - name: AI Code Review
+        uses: coderabbitai/ai-pr-reviewer@latest
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Optional: Configure review settings
+          review-level: "detailed"  # Options: concise, standard, detailed
+          language: "en"
+          # Enable specific review features
+          enable-review: true
+          enable-improve-suggestions: true
+          enable-security-review: true
+          enable-performance-review: true
+          # Custom review instructions
+          system-message: |
+            You are reviewing a Rust CLI application for Google Cloud Text-to-Speech.
+            Focus on:
+            - Rust best practices and idiomatic code
+            - Error handling and safety
+            - Performance considerations
+            - API usage patterns
+            - Security concerns around credentials and API keys
+            - Test coverage and quality
