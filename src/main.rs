@@ -313,10 +313,14 @@ async fn run_bulk_from_config(path: &PathBuf) -> Result<()> {
 
     Ok(())
 }
+fn base_url() -> String {
+    std::env::var("FAST_TTS_BASE_URL").unwrap_or_else(|_| "https://texttospeech.googleapis.com".to_string())
+}
+
 async fn list_voices(json_output: bool) -> Result<()> {
     let token = fetch_access_token().await?;
     let client = reqwest::Client::new();
-    let url = "https://texttospeech.googleapis.com/v1/voices";
+    let url = format!("{}/v1/voices", base_url());
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse()?);
 
@@ -381,7 +385,7 @@ async fn synthesize_to_wav(
 
     let token = fetch_access_token().await?;
     let client = reqwest::Client::new();
-    let url = "https://texttospeech.googleapis.com/v1/text:synthesize";
+    let url = format!("{}/v1/text:synthesize", base_url());
 
     let gender_str = gender.map(|g| match g {
         Gender::Neutral => "NEUTRAL",
@@ -426,6 +430,11 @@ async fn synthesize_to_wav(
 }
 
 async fn fetch_access_token() -> Result<String> {
+    if let Ok(token) = std::env::var("FAST_TTS_TOKEN") {
+        if !token.trim().is_empty() {
+            return Ok(token);
+        }
+    }
     // Supports two common methods:
     // 1) GOOGLE_APPLICATION_CREDENTIALS pointing at a service account JSON key
     // 2) gcloud application-default credentials at well-known path
