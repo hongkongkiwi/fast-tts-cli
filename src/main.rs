@@ -13,10 +13,7 @@ enum Gender {
     Female,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
-enum Provider {
-    Google,
-}
+// Only Google provider is supported for now.
 
 #[derive(Parser, Debug)]
 #[command(name = "fast-tts", version, about = "Generate audio from Google Cloud Text-to-Speech")] 
@@ -71,9 +68,7 @@ struct Cli {
     #[arg(long = "config", value_name = "FILE")]
     config_path: Option<PathBuf>,
 
-    /// TTS provider (for future multi-provider support)
-    #[arg(long = "provider", value_enum, default_value = "google")]
-    provider: Provider,
+    // No provider flag: Google only
 
     /// List available voices and exit
     #[arg(long = "list-voices", action = ArgAction::SetTrue)]
@@ -158,9 +153,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    if args.provider != Provider::Google {
-        anyhow::bail!("provider {:?} not implemented", args.provider);
-    }
+    // Provider handling not needed: Google only
 
     let text = args
         .text
@@ -196,7 +189,6 @@ async fn main() -> Result<()> {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BulkDefaults {
-    provider: Option<String>,
     language: Option<String>,
     voice: Option<String>,
     gender: Option<String>,
@@ -215,7 +207,6 @@ struct BulkDefaults {
 struct BulkItem {
     text: String,
     output: Option<String>,
-    provider: Option<String>,
     language: Option<String>,
     voice: Option<String>,
     gender: Option<String>,
@@ -251,7 +242,6 @@ async fn run_bulk_from_config(path: &PathBuf) -> Result<()> {
     };
 
     let defaults = cfg.defaults.unwrap_or(BulkDefaults {
-        provider: Some("google".to_string()),
         language: Some("en-US".to_string()),
         voice: None,
         gender: None,
@@ -266,18 +256,6 @@ async fn run_bulk_from_config(path: &PathBuf) -> Result<()> {
     });
 
     for (idx, item) in cfg.items.iter().enumerate() {
-        // Provider handling
-        let provider_str = item
-            .provider
-            .as_ref()
-            .or(defaults.provider.as_ref())
-            .cloned()
-            .unwrap_or_else(|| "google".into());
-        let provider = parse_provider_str(&provider_str)?;
-        if provider != Provider::Google {
-            anyhow::bail!("provider {} not implemented (item #{})", provider_str, idx + 1);
-        }
-
         let language = item.language.as_ref().or(defaults.language.as_ref()).cloned().unwrap_or_else(|| "en-US".into());
         let voice = item.voice.as_ref().or(defaults.voice.as_ref()).cloned();
         let gender = item
@@ -342,12 +320,7 @@ async fn run_bulk_from_config(path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn parse_provider_str(s: &str) -> Result<Provider> {
-    match s.to_lowercase().as_str() {
-        "google" => Ok(Provider::Google),
-        _ => anyhow::bail!("unknown provider: {}", s),
-    }
-}
+// Provider parsing removed (Google only)
 fn base_url() -> String {
     std::env::var("FAST_TTS_BASE_URL").unwrap_or_else(|_| "https://texttospeech.googleapis.com".to_string())
 }
