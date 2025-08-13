@@ -1,0 +1,125 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-all-crates: true
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Package (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF#refs/tags/}"
+          BIN="fast-tts-cli"
+          TARGET_BIN="target/release/${BIN}"
+          if [[ ! -f "${TARGET_BIN}" ]]; then echo "missing binary ${TARGET_BIN}"; exit 1; fi
+          OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+          ARCH=$(uname -m)
+          # Normalize arch names
+          case "$ARCH" in
+            x86_64|amd64) ARCH=x86_64 ;;
+            aarch64|arm64) ARCH=arm64 ;;
+          esac
+          PKG_NAME="${BIN}-${VERSION}-${OS}-${ARCH}"
+          STAGE_DIR="dist/${PKG_NAME}"
+          mkdir -p "${STAGE_DIR}"
+          cp "${TARGET_BIN}" "${STAGE_DIR}/"
+          cp README.md "${STAGE_DIR}/" || true
+          tar -C dist -czf "dist/${PKG_NAME}.tar.gz" "${PKG_NAME}"
+          echo "asset=dist/${PKG_NAME}.tar.gz" >> $GITHUB_OUTPUT
+        id: pack_nix
+
+      - name: Upload artifact (Linux/macOS)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack_nix.outputs.asset && steps.pack_nix.outputs.asset || format('asset-{0}', runner.os) }}
+          path: ${{ steps.pack_nix.outputs.asset }}
+          if-no-files-found: error
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = "$env:GITHUB_REF" -replace "refs/tags/",""
+          $bin = "fast-tts-cli.exe"
+          $targetBin = Join-Path "target\release" $bin
+          if (-not (Test-Path $targetBin)) { throw "missing binary $targetBin" }
+          $arch = $env:PROCESSOR_ARCHITECTURE
+          if ($arch -eq 'AMD64') { $arch = 'x86_64' }
+          if ($arch -eq 'ARM64') { $arch = 'arm64' }
+          $pkgName = "fast-tts-cli-$version-windows-$arch"
+          $stageDir = Join-Path dist $pkgName
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+          Copy-Item $targetBin -Destination $stageDir
+          if (Test-Path README.md) { Copy-Item README.md -Destination $stageDir }
+          $zipPath = Join-Path dist ("$pkgName.zip")
+          if (Test-Path $zipPath) { Remove-Item $zipPath }
+          Compress-Archive -Path (Join-Path $stageDir '*') -DestinationPath $zipPath
+          "asset=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+        id: pack_win
+
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack_win.outputs.asset && steps.pack_win.outputs.asset || format('asset-{0}', runner.os) }}
+          path: ${{ steps.pack_win.outputs.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Show files
+        run: ls -R dist
+
+      - name: Create GitHub Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: fast-tts-cli ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          files: |
+            dist/**/*.tar.gz
+            dist/**/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
