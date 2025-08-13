@@ -25,11 +25,48 @@ target/release/fast-tts-cli "Hello world" hello.wav
 
 - Options:
 ```bash
-fast-tts-cli --language en-US --gender female --voice en-US-Neural2-F --rate 1.1 --pitch 0.0 --sample-rate 24000 "Hi" hi.wav
+fast-tts-cli \
+  --language en-US \
+  --gender female \
+  --voice en-US-Neural2-F \
+  --rate 1.1 \
+  --pitch 0.0 \
+  --sample-rate 24000 \
+  --encoding LINEAR16 \
+  --volume 0.0 \
+  --effects-profile wearable-class-device \
+  "Hi" hi.wav
 ```
 
 - List voices:
 ```bash
 fast-tts-cli --list-voices
 fast-tts-cli --list-voices --json
+```
+
+#### Bulk config (YAML or JSON)
+
+Example YAML (`tts.yaml`):
+```yaml
+defaults:
+  language: en-US
+  voice: en-US-Neural2-F
+  rate: 1.0
+  pitch: 0.0
+  encoding: LINEAR16
+  sampleRate: 24000
+  volumeGainDb: 0
+  outputDir: out
+items:
+  - text: "Welcome to our demo"
+    output: intro.wav
+  - text: "<speak>Hello <break time='200ms'/> world</speak>"
+    ssml: true
+    encoding: MP3
+    output: ssml.mp3
+```
+
+Run:
+```bash
+fast-tts-cli --config tts.yaml
 ```

@@ -14,12 +14,12 @@ enum Gender {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "fast-tts", version, about = "Generate WAV from Google Cloud Text-to-Speech")] 
+#[command(name = "fast-tts", version, about = "Generate audio from Google Cloud Text-to-Speech")] 
 struct Cli {
     /// Text to synthesize (use quotes)
     text: Option<String>,
 
-    /// Output WAV file path
+    /// Output file path (matches encoding)
     output: Option<PathBuf>,
 
     /// BCP-47 language code (e.g. en-US)
@@ -42,9 +42,29 @@ struct Cli {
     #[arg(long = "pitch", default_value_t = 0.0)]
     pitch: f32,
 
-    /// Output sample rate (Hz) for WAV
+    /// Output sample rate (Hz)
     #[arg(long = "sample-rate")]
     sample_rate: Option<i32>,
+
+    /// Audio encoding (LINEAR16, MP3, OGG_OPUS, MULAW, ALAW)
+    #[arg(long = "encoding", default_value = "LINEAR16")]
+    encoding: String,
+
+    /// Volume gain in dB (-96.0–16.0)
+    #[arg(long = "volume", default_value_t = 0.0)]
+    volume_gain_db: f32,
+
+    /// Audio effects profile id(s) (comma-separated or repeat flag)
+    #[arg(long = "effects-profile", num_args = 0.., value_delimiter = ',')]
+    effects_profile_id: Vec<String>,
+
+    /// Treat input as SSML instead of plaintext
+    #[arg(long = "ssml", action = ArgAction::SetTrue)]
+    ssml: bool,
+
+    /// Use config file (YAML or JSON) for bulk synthesis
+    #[arg(long = "config", value_name = "FILE")]
+    config_path: Option<PathBuf>,
 
     /// List available voices and exit
     #[arg(long = "list-voices", action = ArgAction::SetTrue)]
@@ -56,8 +76,12 @@ struct Cli {
 }
 
 #[derive(Serialize)]
-struct SynthesisInput<'a> {
-    text: &'a str,
+#[serde(untagged)]
+enum SynthesisInput<'a> {
+    #[serde(rename_all = "camelCase")]
+    Text { text: &'a str },
+    #[serde(rename_all = "camelCase")]
+    Ssml { ssml: &'a str },
 }
 
 #[derive(Serialize)]
@@ -76,8 +100,11 @@ struct AudioConfig<'a> {
     audio_encoding: &'a str,
     speaking_rate: f32,
     pitch: f32,
+    volume_gain_db: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     sample_rate_hertz: Option<i32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    effects_profile_id: Vec<&'a str>,
     enable_legacy_wav_header: bool,
 }
 
@@ -112,6 +139,11 @@ struct Voice {
 async fn main() -> Result<()> {
     let args = Cli::parse();
 
+    if let Some(cfg_path) = &args.config_path {
+        run_bulk_from_config(cfg_path).await?;
+        return Ok(());
+    }
+
     if args.list_voices {
         list_voices(args.json_output).await?;
         return Ok(());
@@ -126,13 +158,7 @@ async fn main() -> Result<()> {
         .as_deref()
         .context("text and output are required unless --list-voices is used")?;
 
-    if let Some(ext) = output.extension() {
-        if ext.to_string_lossy().to_lowercase() != "wav" {
-            anyhow::bail!("output must end with .wav");
-        }
-    } else {
-        anyhow::bail!("output must end with .wav");
-    }
+    validate_output_extension(&output.to_path_buf(), &args.encoding)?;
 
     synthesize_to_wav(
         text,
@@ -143,6 +169,10 @@ async fn main() -> Result<()> {
         args.rate,
         args.pitch,
         args.sample_rate,
+        &args.encoding,
+        args.volume_gain_db,
+        &args.effects_profile_id.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        args.ssml,
     )
     .await?;
 
@@ -150,6 +180,139 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkDefaults {
+    language: Option<String>,
+    voice: Option<String>,
+    gender: Option<String>,
+    rate: Option<f32>,
+    pitch: Option<f32>,
+    sample_rate: Option<i32>,
+    encoding: Option<String>,
+    volume_gain_db: Option<f32>,
+    effects_profile_id: Option<Vec<String>>,
+    ssml: Option<bool>,
+    output_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkItem {
+    text: String,
+    output: Option<String>,
+    language: Option<String>,
+    voice: Option<String>,
+    gender: Option<String>,
+    rate: Option<f32>,
+    pitch: Option<f32>,
+    sample_rate: Option<i32>,
+    encoding: Option<String>,
+    volume_gain_db: Option<f32>,
+    effects_profile_id: Option<Vec<String>>,
+    ssml: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkConfig {
+    defaults: Option<BulkDefaults>,
+    items: Vec<BulkItem>,
+}
+
+async fn run_bulk_from_config(path: &PathBuf) -> Result<()> {
+    let data = fs::read_to_string(path)
+        .with_context(|| format!("failed to read config: {}", path.display()))?;
+    let is_yaml = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| matches!(e.to_lowercase().as_str(), "yml" | "yaml"))
+        .unwrap_or(false);
+
+    let cfg: BulkConfig = if is_yaml {
+        serde_yaml::from_str(&data)?
+    } else {
+        serde_json::from_str(&data)?
+    };
+
+    let defaults = cfg.defaults.unwrap_or(BulkDefaults {
+        language: Some("en-US".to_string()),
+        voice: None,
+        gender: None,
+        rate: Some(1.0),
+        pitch: Some(0.0),
+        sample_rate: None,
+        encoding: Some("LINEAR16".to_string()),
+        volume_gain_db: Some(0.0),
+        effects_profile_id: Some(vec![]),
+        ssml: Some(false),
+        output_dir: None,
+    });
+
+    for (idx, item) in cfg.items.iter().enumerate() {
+        let language = item.language.as_ref().or(defaults.language.as_ref()).cloned().unwrap_or_else(|| "en-US".into());
+        let voice = item.voice.as_ref().or(defaults.voice.as_ref()).cloned();
+        let gender = item
+            .gender
+            .as_ref()
+            .or(defaults.gender.as_ref())
+            .map(|g| match g.to_uppercase().as_str() { "MALE" => Gender::Male, "FEMALE" => Gender::Female, _ => Gender::Neutral });
+        let rate = item.rate.or(defaults.rate).unwrap_or(1.0);
+        let pitch = item.pitch.or(defaults.pitch).unwrap_or(0.0);
+        let sample_rate = item.sample_rate.or(defaults.sample_rate);
+        let encoding = item.encoding.as_ref().or(defaults.encoding.as_ref()).cloned().unwrap_or_else(|| "LINEAR16".into());
+        let volume_gain_db = item.volume_gain_db.or(defaults.volume_gain_db).unwrap_or(0.0);
+        let effects_profile_id: Vec<String> = item
+            .effects_profile_id
+            .clone()
+            .or(defaults.effects_profile_id.clone())
+            .unwrap_or_default();
+        let is_ssml = item.ssml.or(defaults.ssml).unwrap_or(false);
+
+        // Determine output path
+        let output = if let Some(o) = &item.output {
+            PathBuf::from(o)
+        } else if let Some(dir) = &defaults.output_dir {
+            let ext = match encoding.to_uppercase().as_str() {
+                "LINEAR16" | "MULAW" | "ALAW" => "wav",
+                "MP3" => "mp3",
+                "OGG_OPUS" => "ogg",
+                _ => "bin",
+            };
+            PathBuf::from(dir).join(format!("item_{}.{}", idx + 1, ext))
+        } else {
+            let ext = match encoding.to_uppercase().as_str() {
+                "LINEAR16" | "MULAW" | "ALAW" => "wav",
+                "MP3" => "mp3",
+                "OGG_OPUS" => "ogg",
+                _ => "bin",
+            };
+            PathBuf::from(format!("item_{}.{}", idx + 1, ext))
+        };
+
+        validate_output_extension(&output, &encoding)?;
+
+        synthesize_to_wav(
+            &item.text,
+            &output,
+            &language,
+            voice.as_deref(),
+            gender,
+            rate,
+            pitch,
+            sample_rate,
+            &encoding,
+            volume_gain_db,
+            &effects_profile_id.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            is_ssml,
+        )
+        .await?;
+
+        println!("Wrote {}", output.display());
+    }
+
+    Ok(())
+}
 async fn list_voices(json_output: bool) -> Result<()> {
     let token = fetch_access_token().await?;
     let client = reqwest::Client::new();
@@ -181,6 +344,20 @@ async fn list_voices(json_output: bool) -> Result<()> {
     Ok(())
 }
 
+fn validate_output_extension(output: &PathBuf, encoding: &str) -> Result<()> {
+    let want_ext = match encoding.to_uppercase().as_str() {
+        "LINEAR16" | "MULAW" | "ALAW" => "wav",
+        "MP3" => "mp3",
+        "OGG_OPUS" => "ogg",
+        other => anyhow::bail!("unsupported encoding: {}", other),
+    };
+    match output.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()) {
+        Some(ref ext) if ext == want_ext => Ok(()),
+        Some(ext) => anyhow::bail!("output extension .{} does not match encoding {} (expected .{})", ext, encoding, want_ext),
+        None => anyhow::bail!("output must have .{} extension for encoding {}", want_ext, encoding),
+    }
+}
+
 async fn synthesize_to_wav(
     text: &str,
     output: &PathBuf,
@@ -190,6 +367,10 @@ async fn synthesize_to_wav(
     rate: f32,
     pitch: f32,
     sample_rate: Option<i32>,
+    encoding: &str,
+    volume_gain_db: f32,
+    effects_profile_id: &[&str],
+    is_ssml: bool,
 ) -> Result<()> {
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
@@ -209,17 +390,19 @@ async fn synthesize_to_wav(
     });
 
     let req_body = SynthesizeRequest {
-        input: SynthesisInput { text },
+        input: if is_ssml { SynthesisInput::Ssml { ssml: text } } else { SynthesisInput::Text { text } },
         voice: VoiceSelectionParams {
             language_code: language,
             name: voice,
             ssml_gender: gender_str,
         },
         audio_config: AudioConfig {
-            audio_encoding: "LINEAR16",
+            audio_encoding: encoding,
             speaking_rate: rate,
             pitch,
+            volume_gain_db,
             sample_rate_hertz: sample_rate,
+            effects_profile_id: effects_profile_id.to_vec(),
             enable_legacy_wav_header: false,
         },
     };
