@@ -2,6 +2,12 @@
 name = "fast-tts-cli"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/hongkongkiwi/fast-tts-cli"
+homepage = "https://github.com/hongkongkiwi/fast-tts-cli"
+description = "Fast CLI for Google Cloud Text-to-Speech with bulk config and multi-provider scaffold"
+keywords = ["tts", "google", "cli", "audio", "wav"]
+categories = ["command-line-utilities", "multimedia::audio"]
 
 [dependencies]
 anyhow = "1.0"

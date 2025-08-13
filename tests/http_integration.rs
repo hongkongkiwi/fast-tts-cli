@@ -20,13 +20,15 @@ fn synthesize_plain_text_linear16() {
             .header("authorization", "Bearer test-token")
             .json_body_obj(&serde_json::json!({
                 "input": {"text": "hello"},
-                "voice": {"languageCode": "en-US"},
+                "voice": {"languageCode": "en-US", "name": "en-US-Neural2-F", "ssmlGender": "FEMALE"},
                 "audioConfig": {
                     "audioEncoding": "LINEAR16",
                     "speakingRate": 1.0,
                     "pitch": 0.0,
                     "volumeGainDb": 0.0,
-                    "enableLegacyWavHeader": false
+                    "enableLegacyWavHeader": false,
+                    "effectsProfileId": ["wearable-class-device"],
+                    "sampleRateHertz": 24000
                 }
             }));
         then.status(200)
@@ -46,6 +48,14 @@ fn synthesize_plain_text_linear16() {
             "google",
             "--language",
             "en-US",
+            "--voice",
+            "en-US-Neural2-F",
+            "--gender",
+            "female",
+            "--effects-profile",
+            "wearable-class-device",
+            "--sample-rate",
+            "24000",
             "--encoding",
             "LINEAR16",
             "hello",

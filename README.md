@@ -1,26 +1,26 @@
-### fast-tts-cli (Rust)
+### fast-tts-cli
 
-Generate WAV files using Google Cloud Text-to-Speech.
+Fast, flexible CLI for Google Cloud Text-to-Speech.
+
+#### Features
+- Single-shot synthesis with rich options (language, voice, gender, rate, pitch, sample rate, encoding, volume, effects profile)
+- SSML or plaintext
+- Bulk generation from YAML/JSON configs with defaults and overrides
+- Cross-platform binaries via GitHub Releases
+- Multi-provider scaffold (currently Google only)
 
 #### Install
-- Ensure Rust is installed
-- `cargo build --release`
-- Binary at `target/release/fast-tts-cli`
+- Build: `cargo build --release` (binary at `target/release/fast-tts-cli`)
+- Or install: `cargo install --path .`
 
-Auth options (one of):
-- Set `GOOGLE_APPLICATION_CREDENTIALS` to a service account JSON key
-- Or run `gcloud auth application-default login`
+Auth (one of):
+- `GOOGLE_APPLICATION_CREDENTIALS` -> service-account JSON
+- `gcloud auth application-default login`
 
 #### Usage
-
 - Basic:
 ```bash
-cargo run -- "Hello world" hello.wav
-```
-
-- Installed binary:
-```bash
-target/release/fast-tts-cli "Hello world" hello.wav
+fast-tts-cli --provider google "Hello world" hello.wav
 ```
 
 - Options:
@@ -41,13 +41,12 @@ fast-tts-cli \
 
 - List voices:
 ```bash
-fast-tts-cli --list-voices
-fast-tts-cli --list-voices --json
+fast-tts-cli --provider google --list-voices
+fast-tts-cli --provider google --list-voices --json
 ```
 
 #### Bulk config (YAML or JSON)
-
-Example YAML (`tts.yaml`):
+`tts.yaml`:
 ```yaml
 defaults:
   language: en-US
@@ -66,8 +65,11 @@ items:
     encoding: MP3
     output: ssml.mp3
 ```
+Run: `fast-tts-cli --provider google --config tts.yaml`
 
-Run:
-```bash
-fast-tts-cli --config tts.yaml
-```
+#### Dev
+- just: `just check` (fmt, clippy, build, test)
+- Tests mock Google endpoints via `FAST_TTS_BASE_URL` and `FAST_TTS_TOKEN`
+
+#### License
+MIT
