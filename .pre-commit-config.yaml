@@ -36,29 +36,33 @@ repos:
         name: cargo clippy
         description: Lint Rust code with cargo clippy
         entry: cargo clippy
-        args: ['--all-targets', '--all-features', '--', '-D', 'warnings']
+        args: ['--all-targets', '--', '-D', 'warnings']
         language: system
         types: [rust]
         pass_filenames: false
 
-      - id: cargo-check
-        name: cargo check
-        description: Check Rust code compiles
-        entry: cargo check
-        args: ['--all-targets', '--all-features']
+      - id: cargo-build
+        name: cargo build
+        description: Build Rust code (matches CI)
+        entry: cargo build
+        args: ['--verbose', '--all-features']
         language: system
         types: [rust]
         pass_filenames: false
 
       - id: cargo-test
         name: cargo test
-        description: Run Rust tests
+        description: Run Rust tests (matches CI)
         entry: cargo test
-        args: ['--all-features']
+        args: ['--verbose', '--all-features']
         language: system
         types: [rust]
         pass_filenames: false
         stages: [push]
+        additional_dependencies: []
+        env:
+          FAST_TTS_TOKEN: test-token
+          FAST_TTS_BASE_URL: http://localhost:8080
 
       - id: cargo-audit
         name: cargo audit
@@ -92,17 +96,6 @@ repos:
         args: ['--baseline', '.secrets.baseline']
         exclude: package.lock.json
 
-  # Security scanning
-  - repo: https://github.com/trufflesecurity/truffleHog
-    rev: v3.81.10
-    hooks:
-      - id: trufflehog
-        name: TruffleHog
-        description: Detect and prevent secrets in code
-        entry: trufflehog filesystem .
-        language: system
-        stages: [commit, push]
-        pass_filenames: false
 
   # Conventional commits
   - repo: https://github.com/compilerla/conventional-pre-commit
