@@ -18,7 +18,7 @@ jobs:
     name: Validate PR
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           
@@ -72,7 +72,7 @@ jobs:
     name: Security Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       
       - name: Run Trivy security scan
         uses: aquasecurity/trivy-action@master
@@ -93,7 +93,7 @@ jobs:
     name: Cargo Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       
       - name: Install cargo-audit
         run: cargo install cargo-audit
@@ -105,7 +105,7 @@ jobs:
     name: License Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       
       - name: Check licenses
         uses: fossa-contrib/fossa-action@v3
@@ -118,7 +118,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.pull_request.head.ref != 'main'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           
