@@ -7,7 +7,9 @@ use tempfile::tempdir;
 fn prints_help_without_args() {
     let mut cmd = Command::cargo_bin("fast-tts-cli").unwrap();
     cmd.arg("--help");
-    cmd.assert().success().stdout(predicate::str::contains("fast-tts"));
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("fast-tts"));
 }
 
 #[test]

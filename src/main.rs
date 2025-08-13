@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
+use base64::Engine as _;
 use clap::{ArgAction, Parser, ValueEnum};
-use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
-use base64::Engine as _;
+use std::path::{Path, PathBuf};
+// use std::time::Duration; // reserved for future retries/timeouts
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum Gender {
@@ -18,8 +19,42 @@ enum Provider {
     Google,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "SCREAMING_SNAKE_CASE")]
+enum AudioEncoding {
+    Linear16,
+    Mp3,
+    OggOpus,
+    Mulaw,
+    Alaw,
+}
+
+impl AudioEncoding {
+    fn api_str(&self) -> &'static str {
+        match self {
+            AudioEncoding::Linear16 => "LINEAR16",
+            AudioEncoding::Mp3 => "MP3",
+            AudioEncoding::OggOpus => "OGG_OPUS",
+            AudioEncoding::Mulaw => "MULAW",
+            AudioEncoding::Alaw => "ALAW",
+        }
+    }
+
+    fn file_extension(&self) -> &'static str {
+        match self {
+            AudioEncoding::Linear16 | AudioEncoding::Mulaw | AudioEncoding::Alaw => "wav",
+            AudioEncoding::Mp3 => "mp3",
+            AudioEncoding::OggOpus => "ogg",
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
-#[command(name = "fast-tts", version, about = "Generate audio from Google Cloud Text-to-Speech")] 
+#[command(
+    name = "fast-tts",
+    version,
+    about = "Generate audio from Google Cloud Text-to-Speech"
+)]
 struct Cli {
     /// Text to synthesize (use quotes)
     text: Option<String>,
@@ -52,8 +87,13 @@ struct Cli {
     sample_rate: Option<i32>,
 
     /// Audio encoding (LINEAR16, MP3, OGG_OPUS, MULAW, ALAW)
-    #[arg(long = "encoding", default_value = "LINEAR16")]
-    encoding: String,
+    #[arg(
+        long = "encoding",
+        value_enum,
+        default_value = "LINEAR16",
+        ignore_case = true
+    )]
+    encoding: AudioEncoding,
 
     /// Volume gain in dB (-96.0–16.0)
     #[arg(long = "volume", default_value_t = 0.0)]
@@ -82,6 +122,14 @@ struct Cli {
     /// Emit JSON for --list-voices
     #[arg(long = "json", action = ArgAction::SetTrue)]
     json_output: bool,
+
+    /// Request timeout in milliseconds
+    #[arg(long = "timeout", default_value_t = 30_000)]
+    timeout_ms: u64,
+
+    /// Number of retries for transient failures
+    #[arg(long = "retries", default_value_t = 2)]
+    retries: usize,
 }
 
 #[derive(Serialize)]
@@ -149,7 +197,7 @@ async fn main() -> Result<()> {
     let args = Cli::parse();
 
     if let Some(cfg_path) = &args.config_path {
-        run_bulk_from_config(cfg_path).await?;
+        run_bulk_from_config(cfg_path, args.timeout_ms, args.retries).await?;
         return Ok(());
     }
 
@@ -172,21 +220,27 @@ async fn main() -> Result<()> {
         .as_deref()
         .context("text and output are required unless --list-voices is used")?;
 
-    validate_output_extension(&output.to_path_buf(), &args.encoding)?;
+    validate_output_extension(output, args.encoding)?;
 
     synthesize_to_wav(
         text,
-        &output.to_path_buf(),
+        output,
         &args.language,
         args.voice.as_deref(),
         args.gender,
         args.rate,
         args.pitch,
         args.sample_rate,
-        &args.encoding,
+        args.encoding,
         args.volume_gain_db,
-        &args.effects_profile_id.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        &args
+            .effects_profile_id
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>(),
         args.ssml,
+        args.timeout_ms,
+        args.retries,
     )
     .await?;
 
@@ -234,7 +288,7 @@ struct BulkConfig {
     items: Vec<BulkItem>,
 }
 
-async fn run_bulk_from_config(path: &PathBuf) -> Result<()> {
+async fn run_bulk_from_config(path: &PathBuf, timeout_ms: u64, retries: usize) -> Result<()> {
     let data = fs::read_to_string(path)
         .with_context(|| format!("failed to read config: {}", path.display()))?;
     let is_yaml = path
@@ -264,18 +318,33 @@ async fn run_bulk_from_config(path: &PathBuf) -> Result<()> {
     });
 
     for (idx, item) in cfg.items.iter().enumerate() {
-        let language = item.language.as_ref().or(defaults.language.as_ref()).cloned().unwrap_or_else(|| "en-US".into());
-        let voice = item.voice.as_ref().or(defaults.voice.as_ref()).cloned();
-        let gender = item
-            .gender
+        let language = item
+            .language
             .as_ref()
-            .or(defaults.gender.as_ref())
-            .map(|g| match g.to_uppercase().as_str() { "MALE" => Gender::Male, "FEMALE" => Gender::Female, _ => Gender::Neutral });
+            .or(defaults.language.as_ref())
+            .cloned()
+            .unwrap_or_else(|| "en-US".into());
+        let voice = item.voice.as_ref().or(defaults.voice.as_ref()).cloned();
+        let gender = item.gender.as_ref().or(defaults.gender.as_ref()).map(|g| {
+            match g.to_uppercase().as_str() {
+                "MALE" => Gender::Male,
+                "FEMALE" => Gender::Female,
+                _ => Gender::Neutral,
+            }
+        });
         let rate = item.rate.or(defaults.rate).unwrap_or(1.0);
         let pitch = item.pitch.or(defaults.pitch).unwrap_or(0.0);
         let sample_rate = item.sample_rate.or(defaults.sample_rate);
-        let encoding = item.encoding.as_ref().or(defaults.encoding.as_ref()).cloned().unwrap_or_else(|| "LINEAR16".into());
-        let volume_gain_db = item.volume_gain_db.or(defaults.volume_gain_db).unwrap_or(0.0);
+        let encoding = item
+            .encoding
+            .as_ref()
+            .or(defaults.encoding.as_ref())
+            .cloned()
+            .unwrap_or_else(|| "LINEAR16".into());
+        let volume_gain_db = item
+            .volume_gain_db
+            .or(defaults.volume_gain_db)
+            .unwrap_or(0.0);
         let effects_profile_id: Vec<String> = item
             .effects_profile_id
             .clone()
@@ -304,7 +373,7 @@ async fn run_bulk_from_config(path: &PathBuf) -> Result<()> {
             PathBuf::from(format!("item_{}.{}", idx + 1, ext))
         };
 
-        validate_output_extension(&output, &encoding)?;
+        validate_output_extension(&output, parse_encoding_from_str(&encoding)?)?;
 
         synthesize_to_wav(
             &item.text,
@@ -315,10 +384,15 @@ async fn run_bulk_from_config(path: &PathBuf) -> Result<()> {
             rate,
             pitch,
             sample_rate,
-            &encoding,
+            parse_encoding_from_str(&encoding)?,
             volume_gain_db,
-            &effects_profile_id.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            &effects_profile_id
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
             is_ssml,
+            timeout_ms,
+            retries,
         )
         .await?;
 
@@ -330,15 +404,25 @@ async fn run_bulk_from_config(path: &PathBuf) -> Result<()> {
 
 // Provider parsing removed (Google only)
 fn base_url() -> String {
-    std::env::var("FAST_TTS_BASE_URL").unwrap_or_else(|_| "https://texttospeech.googleapis.com".to_string())
+    std::env::var("FAST_TTS_BASE_URL")
+        .unwrap_or_else(|_| "https://texttospeech.googleapis.com".to_string())
+}
+
+fn build_http_client_for_base(base: &str) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder();
+    if base.contains("127.0.0.1") || base.contains("localhost") {
+        builder = builder.no_proxy();
+    }
+    Ok(builder.build()?)
 }
 
 async fn list_voices(json_output: bool) -> Result<()> {
     let token = fetch_access_token().await?;
-    let client = reqwest::Client::new();
-    let url = format!("{}/v1/voices", base_url());
+    let base = base_url();
+    let client = build_http_client_for_base(&base)?;
+    let url = format!("{base}/v1/voices");
     let mut headers = HeaderMap::new();
-    headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse()?);
+    headers.insert(AUTHORIZATION, format!("Bearer {token}").parse()?);
 
     let resp = client
         .get(url)
@@ -353,55 +437,75 @@ async fn list_voices(json_output: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&data)?);
     } else {
         for v in &data.voices {
-            let langs = if v.language_codes.is_empty() { String::from("-") } else { v.language_codes.join(",") };
+            let langs = if v.language_codes.is_empty() {
+                String::from("-")
+            } else {
+                v.language_codes.join(",")
+            };
             let rate = v
                 .natural_sample_rate_hertz
                 .map(|r| r.to_string())
                 .unwrap_or_else(|| "-".into());
-            println!("{:<28} {:<7} {:>6} Hz  [{}]", v.name, v.ssml_gender, rate, langs);
+            println!(
+                "{:<28} {:<7} {:>6} Hz  [{}]",
+                v.name, v.ssml_gender, rate, langs
+            );
         }
     }
     Ok(())
 }
 
-fn validate_output_extension(output: &PathBuf, encoding: &str) -> Result<()> {
-    let want_ext = match encoding.to_uppercase().as_str() {
-        "LINEAR16" | "MULAW" | "ALAW" => "wav",
-        "MP3" => "mp3",
-        "OGG_OPUS" => "ogg",
-        other => anyhow::bail!("unsupported encoding: {}", other),
-    };
-    match output.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()) {
+fn validate_output_extension(output: &Path, encoding: AudioEncoding) -> Result<()> {
+    let want_ext = encoding.file_extension();
+    match output
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase())
+    {
         Some(ref ext) if ext == want_ext => Ok(()),
-        Some(ext) => anyhow::bail!("output extension .{} does not match encoding {} (expected .{})", ext, encoding, want_ext),
-        None => anyhow::bail!("output must have .{} extension for encoding {}", want_ext, encoding),
+        Some(ext) => anyhow::bail!(
+            "output extension .{} does not match encoding {} (expected .{})",
+            ext,
+            encoding.api_str(),
+            want_ext
+        ),
+        None => anyhow::bail!(
+            "output must have .{} extension for encoding {}",
+            want_ext,
+            encoding.api_str()
+        ),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn synthesize_to_wav(
     text: &str,
-    output: &PathBuf,
+    output: &Path,
     language: &str,
     voice: Option<&str>,
     gender: Option<Gender>,
     rate: f32,
     pitch: f32,
     sample_rate: Option<i32>,
-    encoding: &str,
+    encoding: AudioEncoding,
     volume_gain_db: f32,
     effects_profile_id: &[&str],
     is_ssml: bool,
+    _timeout_ms: u64,
+    _retries: usize,
 ) -> Result<()> {
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create output directory: {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create output directory: {}", parent.display())
+            })?;
         }
     }
 
     let token = fetch_access_token().await?;
-    let client = reqwest::Client::new();
-    let url = format!("{}/v1/text:synthesize", base_url());
+    let base = base_url();
+    let client = build_http_client_for_base(&base)?;
+    let url = format!("{base}/v1/text:synthesize");
 
     let gender_str = gender.map(|g| match g {
         Gender::Neutral => "NEUTRAL",
@@ -410,14 +514,18 @@ async fn synthesize_to_wav(
     });
 
     let req_body = SynthesizeRequest {
-        input: if is_ssml { SynthesisInput::Ssml { ssml: text } } else { SynthesisInput::Text { text } },
+        input: if is_ssml {
+            SynthesisInput::Ssml { ssml: text }
+        } else {
+            SynthesisInput::Text { text }
+        },
         voice: VoiceSelectionParams {
             language_code: language,
             name: voice,
             ssml_gender: gender_str,
         },
         audio_config: AudioConfig {
-            audio_encoding: encoding,
+            audio_encoding: encoding.api_str(),
             speaking_rate: rate,
             pitch,
             volume_gain_db,
@@ -428,7 +536,7 @@ async fn synthesize_to_wav(
     };
 
     let mut headers = HeaderMap::new();
-    headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse()?);
+    headers.insert(AUTHORIZATION, format!("Bearer {token}").parse()?);
     headers.insert(CONTENT_TYPE, "application/json".parse()?);
 
     let resp = client
@@ -479,7 +587,7 @@ struct ServiceAccountKey {
 }
 
 async fn fetch_token_from_service_account(path: PathBuf) -> Result<String> {
-    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 
     let key_data = fs::read_to_string(&path)
         .with_context(|| format!("failed to read service account key: {}", path.display()))?;
@@ -530,9 +638,22 @@ async fn fetch_token_from_service_account(path: PathBuf) -> Result<String> {
         .await?
         .error_for_status()?;
     #[derive(Deserialize)]
-    struct TokenResp { access_token: String }
+    struct TokenResp {
+        access_token: String,
+    }
     let tr: TokenResp = resp.json().await?;
     Ok(tr.access_token)
+}
+
+fn parse_encoding_from_str(s: &str) -> Result<AudioEncoding> {
+    match s.trim().to_uppercase().as_str() {
+        "LINEAR16" => Ok(AudioEncoding::Linear16),
+        "MP3" => Ok(AudioEncoding::Mp3),
+        "OGG_OPUS" => Ok(AudioEncoding::OggOpus),
+        "MULAW" => Ok(AudioEncoding::Mulaw),
+        "ALAW" => Ok(AudioEncoding::Alaw),
+        other => anyhow::bail!("unsupported encoding: {other}"),
+    }
 }
 
 async fn fetch_token_from_adc(path: PathBuf) -> Result<String> {
@@ -562,7 +683,9 @@ async fn fetch_token_from_adc(path: PathBuf) -> Result<String> {
         .await?
         .error_for_status()?;
     #[derive(Deserialize)]
-    struct TokenResp { access_token: String }
+    struct TokenResp {
+        access_token: String,
+    }
     let tr: TokenResp = resp.json().await?;
     Ok(tr.access_token)
 }

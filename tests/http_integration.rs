@@ -43,6 +43,10 @@ fn synthesize_plain_text_linear16() {
     let mut cmd = Command::cargo_bin("fast-tts-cli").unwrap();
     cmd.env("FAST_TTS_TOKEN", "test-token")
         .env("FAST_TTS_BASE_URL", server.base_url())
+        .env_remove("HTTP_PROXY")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("http_proxy")
+        .env_remove("https_proxy")
         .args([
             "--provider",
             "google",
@@ -61,7 +65,9 @@ fn synthesize_plain_text_linear16() {
             "hello",
             out.to_str().unwrap(),
         ]);
-    cmd.assert().success().stdout(predicate::str::contains("Wrote"));
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Wrote"));
 
     let bytes = read_file(&out);
     assert_eq!(bytes, b"WAVDATA");
@@ -87,10 +93,9 @@ fn synthesize_ssml_mp3() {
                     "enableLegacyWavHeader": false
                 }
             }));
-        then.status(200)
-            .json_body_obj(&serde_json::json!({
-                "audio_content": base64::engine::general_purpose::STANDARD.encode("MP3DATA")
-            }));
+        then.status(200).json_body_obj(&serde_json::json!({
+            "audio_content": base64::engine::general_purpose::STANDARD.encode("MP3DATA")
+        }));
     });
 
     let dir = tempdir().unwrap();
@@ -99,6 +104,10 @@ fn synthesize_ssml_mp3() {
     let mut cmd = Command::cargo_bin("fast-tts-cli").unwrap();
     cmd.env("FAST_TTS_TOKEN", "test-token")
         .env("FAST_TTS_BASE_URL", server.base_url())
+        .env_remove("HTTP_PROXY")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("http_proxy")
+        .env_remove("https_proxy")
         .args([
             "--provider",
             "google",
@@ -135,8 +144,14 @@ fn list_voices_json() {
     let mut cmd = Command::cargo_bin("fast-tts-cli").unwrap();
     cmd.env("FAST_TTS_TOKEN", "fake")
         .env("FAST_TTS_BASE_URL", server.base_url())
+        .env_remove("HTTP_PROXY")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("http_proxy")
+        .env_remove("https_proxy")
         .args(["--provider", "google", "--list-voices", "--json"]);
 
-    cmd.assert().success().stdout(predicate::str::contains("\"voices\""));
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("\"voices\""));
     voices_mock.assert();
 }
