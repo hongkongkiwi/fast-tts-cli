@@ -7,6 +7,272 @@ use std::fs;
 use std::path::{Path, PathBuf};
 // use std::time::Duration; // reserved for future retries/timeouts
 
+#[cfg(feature = "mcp")]
+mod mcp_integration {
+    use super::*;
+    use anyhow::Result;
+
+    // Import rust-sdk types guarded by feature
+    use ::mcp_server::{ByteTransport, Router, Server};
+    use axum::{self, response::sse::{Event, Sse}, routing::{get, post}, Json, Router as AxumRouter};
+    use tower_service::Service;
+    use mcp_spec::content::Content;
+    use mcp_spec::handler::{PromptError, ResourceError, ToolError};
+    use mcp_spec::prompt::{Prompt, PromptArgument};
+    use mcp_spec::protocol::{JsonRpcRequest, JsonRpcResponse, ServerCapabilities};
+    use std::convert::Infallible;
+    use std::time::Duration;
+    use tokio_stream::StreamExt as _;
+    use tokio as mcp_tokio;
+
+    pub async fn run_mcp_server(mode: McpMode, addr: Option<String>) -> Result<()> {
+        // Build Router implementation backed by our CLI functions
+        let router = RouterService(FastTtsRouter);
+        let mut server = Server::new(router);
+
+        match mode {
+            McpMode::Stdio => {
+                let transport = ByteTransport::new(mcp_tokio::io::stdin(), mcp_tokio::io::stdout());
+                server.run(transport).await?;
+            }
+            McpMode::Http | McpMode::Sse => {
+                async fn rpc(Json(req): Json<JsonRpcRequest>) -> Result<Json<JsonRpcResponse>, axum::http::StatusCode> {
+                    let mut service = mcp_server::router::RouterService(FastTtsRouter);
+                    service
+                        .call(req)
+                        .await
+                        .map(Json)
+                        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                }
+
+                async fn sse() -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+                    let interval = mcp_tokio::time::interval(Duration::from_secs(10));
+                    let stream = tokio_stream::wrappers::IntervalStream::new(interval)
+                        .map(|_| Ok(Event::default().comment("keepalive")));
+                    Sse::new(stream)
+                }
+
+                let app: AxumRouter = AxumRouter::new()
+                    .route("/rpc", post(rpc))
+                    .route("/events", get(sse));
+
+                let bind_addr = addr.unwrap_or_else(|| "127.0.0.1:2024".to_string());
+                let listener = mcp_tokio::net::TcpListener::bind(&bind_addr).await?;
+                axum::serve(listener, app).await?;
+            }
+        }
+        Ok(())
+    }
+
+    use mcp_server::router::{CapabilitiesBuilder, RouterService};
+
+    #[derive(Clone)]
+    struct FastTtsRouter;
+
+    impl Router for FastTtsRouter {
+        fn name(&self) -> String {
+            "fast-tts-cli".to_string()
+        }
+        fn instructions(&self) -> String {
+            "Google Cloud TTS server providing synthesize and listVoices tools.".to_string()
+        }
+        fn capabilities(&self) -> ServerCapabilities {
+            CapabilitiesBuilder::new().with_tools(false).build()
+        }
+        fn list_tools(&self) -> Vec<mcp_spec::tool::Tool> {
+            vec![
+                mcp_spec::tool::Tool::new(
+                    "synthesize".to_string(),
+                    "Synthesize speech and write to a file".to_string(),
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string"},
+                            "output": {"type": "string"},
+                            "language": {"type": "string"},
+                            "voice": {"type": "string"},
+                            "gender": {"type": "string"},
+                            "rate": {"type": "number"},
+                            "pitch": {"type": "number"},
+                            "sampleRate": {"type": "integer"},
+                            "encoding": {"type": "string"},
+                            "volumeGainDb": {"type": "number"},
+                            "effectsProfileId": {"type": "array", "items": {"type": "string"}},
+                            "ssml": {"type": "boolean"}
+                        },
+                        "required": ["text", "output"]
+                    }),
+                ),
+                mcp_spec::tool::Tool::new(
+                    "listVoices".to_string(),
+                    "List available voices from provider".to_string(),
+                    serde_json::json!({ "type": "object", "properties": {"json": {"type": "boolean"}}, "required": [] }),
+                ),
+            ]
+        }
+
+        fn call_tool(
+            &self,
+            tool_name: &str,
+            arguments: serde_json::Value,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Vec<Content>, ToolError>> + Send + 'static>,
+        > {
+            let name = tool_name.to_string();
+            Box::pin(async move {
+                match name.as_str() {
+                    "synthesize" => {
+                        let text = arguments
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| ToolError::InvalidParameters("text required".into()))?
+                            .to_string();
+                        let output = arguments
+                            .get("output")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| ToolError::InvalidParameters("output required".into()))?
+                            .to_string();
+                        let language = arguments
+                            .get("language")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("en-US")
+                            .to_string();
+                        let voice = arguments
+                            .get("voice")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        let gender_opt =
+                            arguments.get("gender").and_then(|v| v.as_str()).map(|g| {
+                                match g.to_uppercase().as_str() {
+                                    "MALE" => Gender::Male,
+                                    "FEMALE" => Gender::Female,
+                                    _ => Gender::Neutral,
+                                }
+                            });
+                        let rate = arguments
+                            .get("rate")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(1.0) as f32;
+                        let pitch = arguments
+                            .get("pitch")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0) as f32;
+                        let sample_rate = arguments
+                            .get("sampleRate")
+                            .and_then(|v| v.as_i64())
+                            .map(|n| n as i32);
+                        let encoding = arguments
+                            .get("encoding")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("LINEAR16");
+                        let volume_gain_db = arguments
+                            .get("volumeGainDb")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0) as f32;
+                        let effects_profile_id: Vec<String> = arguments
+                            .get("effectsProfileId")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let is_ssml = arguments
+                            .get("ssml")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+
+                        let output_path = PathBuf::from(&output);
+                        let enc = super::parse_encoding_from_str(encoding)
+                            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
+
+                        super::synthesize_to_wav(
+                            &text,
+                            &output_path,
+                            &language,
+                            voice.as_deref(),
+                            gender_opt,
+                            rate,
+                            pitch,
+                            sample_rate,
+                            enc,
+                            volume_gain_db,
+                            &effects_profile_id
+                                .iter()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>(),
+                            is_ssml,
+                            30_000,
+                            2,
+                        )
+                        .await
+                        .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
+
+                        Ok(vec![Content::text(
+                            serde_json::json!({"ok": true, "output": output}).to_string(),
+                        )])
+                    }
+                    "listVoices" => {
+                        let token = super::fetch_access_token()
+                            .await
+                            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
+                        let base = super::base_url();
+                        let client = super::build_http_client_for_base(&base)
+                            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
+                        let url = format!("{base}/v1/voices");
+                        let mut headers = HeaderMap::new();
+                        let auth_val: reqwest::header::HeaderValue = format!("Bearer {token}")
+                            .parse()
+                            .map_err(|e: reqwest::header::InvalidHeaderValue| {
+                                ToolError::ExecutionError(e.to_string())
+                            })?;
+                        headers.insert(AUTHORIZATION, auth_val);
+                        let resp = client
+                            .get(url)
+                            .headers(headers)
+                            .send()
+                            .await
+                            .map_err(|e| ToolError::ExecutionError(e.to_string()))?
+                            .error_for_status()
+                            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
+                        let data: super::ListVoicesResponse = resp
+                            .json()
+                            .await
+                            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
+                        Ok(vec![Content::text(
+                            serde_json::to_string(&data).unwrap_or_else(|_| "{}".into()),
+                        )])
+                    }
+                    _ => Err(ToolError::NotFound(format!("Tool {} not found", name))),
+                }
+            })
+        }
+
+        fn list_resources(&self) -> Vec<mcp_spec::resource::Resource> {
+            vec![]
+        }
+        fn read_resource(
+            &self,
+            _uri: &str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<String, ResourceError>> + Send + 'static>,
+        > {
+            Box::pin(async { Err(ResourceError::NotFound("not supported".into())) })
+        }
+        fn list_prompts(&self) -> Vec<Prompt> {
+            vec![]
+        }
+        fn get_prompt(
+            &self,
+            _prompt_name: &str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<String, PromptError>> + Send + 'static>,
+        > {
+            Box::pin(async { Ok(String::new()) })
+        }
+    }
+}
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum Gender {
     Neutral,
@@ -17,6 +283,14 @@ enum Gender {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum Provider {
     Google,
+    Openai,
+    Elevenlabs,
+    Deepgram,
+    Polly,
+    Azure,
+    Hume,
+    Listnr,
+    Murf,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -27,6 +301,13 @@ enum AudioEncoding {
     OggOpus,
     Mulaw,
     Alaw,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum McpMode {
+    Stdio,
+    Sse,
+    Http,
 }
 
 impl AudioEncoding {
@@ -130,6 +411,14 @@ struct Cli {
     /// Number of retries for transient failures
     #[arg(long = "retries", default_value_t = 2)]
     retries: usize,
+
+    /// Run as Model Context Protocol server (stdio, sse, http)
+    #[arg(long = "mcp-mode", value_enum)]
+    mcp_mode: Option<McpMode>,
+
+    /// Address or URL for MCP SSE/HTTP (e.g. 127.0.0.1:2024 or http://127.0.0.1:2024)
+    #[arg(long = "mcp-addr")]
+    mcp_addr: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -196,6 +485,20 @@ struct Voice {
 async fn main() -> Result<()> {
     let args = Cli::parse();
 
+    // If running in MCP server mode, start the server and exit.
+    if let Some(_mode) = args.mcp_mode {
+        #[cfg(feature = "mcp")]
+        {
+            return mcp_integration::run_mcp_server(_mode, args.mcp_addr).await;
+        }
+        #[cfg(not(feature = "mcp"))]
+        {
+            anyhow::bail!(
+                "This binary was built without 'mcp' feature. Rebuild with: cargo run --features mcp -- --mcp-mode stdio"
+            );
+        }
+    }
+
     if let Some(cfg_path) = &args.config_path {
         run_bulk_from_config(cfg_path, args.timeout_ms, args.retries).await?;
         return Ok(());
@@ -204,11 +507,6 @@ async fn main() -> Result<()> {
     if args.list_voices {
         list_voices(args.json_output).await?;
         return Ok(());
-    }
-
-    // Validate provider (only Google implemented for now)
-    if args.provider != Provider::Google {
-        anyhow::bail!("provider {:?} not implemented", args.provider);
     }
 
     let text = args
@@ -222,27 +520,81 @@ async fn main() -> Result<()> {
 
     validate_output_extension(output, args.encoding)?;
 
-    synthesize_to_wav(
-        text,
-        output,
-        &args.language,
-        args.voice.as_deref(),
-        args.gender,
-        args.rate,
-        args.pitch,
-        args.sample_rate,
-        args.encoding,
-        args.volume_gain_db,
-        &args
-            .effects_profile_id
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>(),
-        args.ssml,
-        args.timeout_ms,
-        args.retries,
-    )
-    .await?;
+    match args.provider {
+        Provider::Google => {
+            synthesize_to_wav(
+                text,
+                output,
+                &args.language,
+                args.voice.as_deref(),
+                args.gender,
+                args.rate,
+                args.pitch,
+                args.sample_rate,
+                args.encoding,
+                args.volume_gain_db,
+                &args
+                    .effects_profile_id
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>(),
+                args.ssml,
+                args.timeout_ms,
+                args.retries,
+            )
+            .await?;
+        }
+        Provider::Azure => {
+            synthesize_azure(
+                text,
+                output,
+                &args.language,
+                args.voice.as_deref(),
+                args.encoding,
+                args.sample_rate,
+            )
+            .await?;
+        }
+        Provider::Openai => {
+            synthesize_openai(text, output, args.voice.as_deref(), args.encoding).await?;
+        }
+        Provider::Elevenlabs => {
+            synthesize_elevenlabs(
+                text,
+                output,
+                args.voice.as_deref(),
+                args.encoding,
+                std::env::var("ELEVENLABS_MODEL_ID").ok().as_deref(),
+            )
+            .await?;
+        }
+        Provider::Deepgram => {
+            synthesize_deepgram(
+                text,
+                output,
+                args.voice.as_deref(),
+                args.encoding,
+                std::env::var("DEEPGRAM_TTS_MODEL").ok().as_deref(),
+            )
+            .await?;
+        }
+        Provider::Polly => {
+            #[cfg(feature = "polly")]
+            {
+                synthesize_polly(text, output, args.voice.as_deref(), args.encoding).await?;
+            }
+            #[cfg(not(feature = "polly"))]
+            {
+                anyhow::bail!("Amazon Polly support requires --features polly");
+            }
+        }
+        Provider::Hume | Provider::Listnr | Provider::Murf => {
+            anyhow::bail!(
+                "provider {:?} not yet implemented. Please open an issue with API details.",
+                args.provider
+            );
+        }
+    }
 
     println!("Wrote {}", output.display());
     Ok(())
@@ -375,6 +727,7 @@ async fn run_bulk_from_config(path: &PathBuf, timeout_ms: u64, retries: usize) -
 
         validate_output_extension(&output, parse_encoding_from_str(&encoding)?)?;
 
+        // For now, bulk uses Google flow; extend with per-provider if needed
         synthesize_to_wav(
             &item.text,
             &output,
@@ -477,6 +830,176 @@ fn validate_output_extension(output: &Path, encoding: AudioEncoding) -> Result<(
     }
 }
 
+async fn synthesize_openai(
+    text: &str,
+    output: &Path,
+    voice: Option<&str>,
+    encoding: AudioEncoding,
+) -> Result<()> {
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .context("OPENAI_API_KEY is required for provider openai")?;
+    let model = std::env::var("OPENAI_TTS_MODEL").unwrap_or_else(|_| "gpt-4o-mini-tts".to_string());
+    let voice_name = voice.unwrap_or("alloy");
+    let out_format = match encoding {
+        AudioEncoding::Mp3 => "mp3",
+        AudioEncoding::OggOpus => "opus",
+        _ => "wav",
+    };
+    let client = reqwest::Client::new();
+    let url = "https://api.openai.com/v1/audio/speech";
+    let resp = client
+        .post(url)
+        .bearer_auth(api_key)
+        .json(&serde_json::json!({
+            "model": model,
+            "voice": voice_name,
+            "input": text,
+            "format": out_format
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    let bytes = resp.bytes().await?;
+    if let Some(parent) = output.parent() { if !parent.as_os_str().is_empty() { fs::create_dir_all(parent)?; } }
+    fs::write(output, &bytes)?;
+    Ok(())
+}
+
+async fn synthesize_azure(
+    text: &str,
+    output: &Path,
+    language: &str,
+    voice: Option<&str>,
+    encoding: AudioEncoding,
+    sample_rate: Option<i32>,
+) -> Result<()> {
+    let key = std::env::var("AZURE_SPEECH_KEY").context("AZURE_SPEECH_KEY is required for provider azure")?;
+    let region = std::env::var("AZURE_SPEECH_REGION").context("AZURE_SPEECH_REGION is required for provider azure")?;
+    let voice_name = voice.unwrap_or(match language {
+        // sensible defaults by locale
+        l if l.starts_with("en-US") => "en-US-JennyNeural",
+        l if l.starts_with("en-GB") => "en-GB-LibbyNeural",
+        _ => "en-US-JennyNeural",
+    });
+    let format = match (encoding, sample_rate) {
+        (AudioEncoding::Mp3, Some(_)) => "audio-48khz-192kbitrate-mono-mp3".to_string(),
+        (AudioEncoding::Mp3, None) => "audio-24khz-160kbitrate-mono-mp3".to_string(),
+        (AudioEncoding::OggOpus, _) => "ogg-48khz-16bit-mono-opus".to_string(),
+        (AudioEncoding::Linear16, Some(sr)) if sr >= 48000 => "riff-48khz-16bit-mono-pcm".to_string(),
+        (AudioEncoding::Linear16, _) => "riff-24khz-16bit-mono-pcm".to_string(),
+        (AudioEncoding::Mulaw, _) => "mulaw-8khz-8bit-mono".to_string(),
+        (AudioEncoding::Alaw, _) => "alaw-8khz-8bit-mono".to_string(),
+    };
+    let ssml = format!(
+        "<speak version=\"1.0\" xml:lang=\"{lang}\"><voice xml:lang=\"{lang}\" name=\"{voice}\">{text}</voice></speak>",
+        lang = language,
+        voice = voice_name,
+        text = htmlescape::encode_minimal(text)
+    );
+    let url = format!("https://{region}.tts.speech.microsoft.com/cognitiveservices/v1");
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .header("Ocp-Apim-Subscription-Key", key)
+        .header("X-Microsoft-OutputFormat", format)
+        .header(CONTENT_TYPE, "application/ssml+xml")
+        .header("User-Agent", "fast-tts-cli")
+        .body(ssml)
+        .send()
+        .await?
+        .error_for_status()?;
+    let bytes = resp.bytes().await?;
+    if let Some(parent) = output.parent() { if !parent.as_os_str().is_empty() { fs::create_dir_all(parent)?; } }
+    fs::write(output, &bytes)?;
+    Ok(())
+}
+
+async fn synthesize_elevenlabs(
+    text: &str,
+    output: &Path,
+    voice: Option<&str>,
+    encoding: AudioEncoding,
+    model_id: Option<&str>,
+) -> Result<()> {
+    let api_key = std::env::var("ELEVENLABS_API_KEY")
+        .context("ELEVENLABS_API_KEY is required for provider elevenlabs")?;
+    let voice_id = voice.unwrap_or("Rachel");
+    let model = model_id.unwrap_or("eleven_multilingual_v2");
+    let format = match encoding { AudioEncoding::Mp3 => "mp3", AudioEncoding::OggOpus => "ogg", _ => "wav" };
+    let url = format!("https://api.elevenlabs.io/v1/text-to-speech/{voice_id}");
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .header("xi-api-key", api_key)
+        .header(CONTENT_TYPE, "application/json")
+        .json(&serde_json::json!({
+            "text": text,
+            "model_id": model,
+            "voice_settings": {"stability": 0.5, "similarity_boost": 0.5},
+            "output_format": format
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    let bytes = resp.bytes().await?;
+    if let Some(parent) = output.parent() { if !parent.as_os_str().is_empty() { fs::create_dir_all(parent)?; } }
+    fs::write(output, &bytes)?;
+    Ok(())
+}
+
+async fn synthesize_deepgram(
+    text: &str,
+    output: &Path,
+    voice: Option<&str>,
+    encoding: AudioEncoding,
+    model_id: Option<&str>,
+) -> Result<()> {
+    let api_key = std::env::var("DEEPGRAM_API_KEY")
+        .context("DEEPGRAM_API_KEY is required for provider deepgram")?;
+    let model = model_id.unwrap_or("aura-asteria-en");
+    let voice_name = voice.unwrap_or("aura-asteria-en");
+    let format = match encoding { AudioEncoding::Mp3 => "mp3", AudioEncoding::OggOpus => "opus", _ => "wav" };
+    let url = "https://api.deepgram.com/v1/speak";
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(url)
+        .header("Authorization", format!("Token {api_key}"))
+        .query(&[("model", model), ("voice", voice_name), ("format", format)])
+        .body(text.to_string())
+        .send()
+        .await?
+        .error_for_status()?;
+    let bytes = resp.bytes().await?;
+    if let Some(parent) = output.parent() { if !parent.as_os_str().is_empty() { fs::create_dir_all(parent)?; } }
+    fs::write(output, &bytes)?;
+    Ok(())
+}
+
+#[cfg(feature = "polly")]
+async fn synthesize_polly(
+    text: &str,
+    output: &Path,
+    voice: Option<&str>,
+    encoding: AudioEncoding,
+) -> Result<()> {
+    use aws_sdk_polly::types::{Engine, OutputFormat, VoiceId};
+    let config = aws_config::load_from_env().await;
+    let client = aws_sdk_polly::Client::new(&config);
+    let voice_id = voice.unwrap_or("Joanna");
+    let output_format = match encoding { AudioEncoding::Mp3 => OutputFormat::Mp3, AudioEncoding::OggOpus => OutputFormat::OggVorbis, _ => OutputFormat::Pcm };
+    let resp = client
+        .synthesize_speech()
+        .set_text(Some(text.to_string()))
+        .set_voice_id(Some(VoiceId::from(voice_id)))
+        .set_output_format(Some(output_format))
+        .set_engine(Some(Engine::Neural))
+        .send()
+        .await?;
+    let data = resp.audio_stream.unwrap().into_bytes().collect::<Result<Vec<_>, _>>()?;
+    if let Some(parent) = output.parent() { if !parent.as_os_str().is_empty() { fs::create_dir_all(parent)?; } }
+    fs::write(output, data)?;
+    Ok(())
+}
 #[allow(clippy::too_many_arguments)]
 async fn synthesize_to_wav(
     text: &str,

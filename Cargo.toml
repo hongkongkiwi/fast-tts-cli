@@ -9,6 +9,13 @@ description = "Fast CLI for Google Cloud Text-to-Speech with bulk config and mul
 keywords = ["tts", "google", "cli", "audio", "wav"]
 categories = ["command-line-utilities", "multimedia::audio"]
 
+[features]
+# Enable Model Context Protocol server support via rust-sdk
+mcp = ["dep:mcp-server", "dep:axum", "dep:mcp-spec", "dep:tokio-stream", "dep:futures", "dep:tower-service"]
+
+# Optional provider integrations
+polly = ["dep:aws-config", "dep:aws-sdk-polly"]
+
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
@@ -20,6 +27,17 @@ tokio = { version = "1.39", features = ["rt-multi-thread", "macros"] }
 base64 = "0.22"
 jsonwebtoken = "9"
 dirs = "6"
+htmlescape = "0.3"
+aws-config = { version = "1", optional = true }
+aws-sdk-polly = { version = "1", optional = true }
+
+# Optional MCP Server SDK (only compiled with `--features mcp`)
+mcp-server = { version = "0.1.0", optional = true }
+axum = { version = "0.7", optional = true }
+tokio-stream = { version = "0.1", optional = true }
+mcp-spec = { version = "0.1.0", optional = true }
+futures = { version = "0.3", optional = true }
+tower-service = { version = "0.3", optional = true }
 
 [dev-dependencies]
 assert_cmd = "2.0"
