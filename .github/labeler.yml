@@ -1,0 +1,46 @@
+# Configuration for GitHub labeler action
+# https://github.com/actions/labeler
+
+documentation:
+  - changed-files:
+    - any-glob-to-any-file:
+      - '*.md'
+      - 'docs/**'
+      - 'LICENSE*'
+
+rust:
+  - changed-files:
+    - any-glob-to-any-file:
+      - '**/*.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+tests:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'tests/**'
+      - '**/*_test.rs'
+      - '**/*_tests.rs'
+
+ci:
+  - changed-files:
+    - any-glob-to-any-file:
+      - '.github/**'
+      - '.gitlab-ci.yml'
+      - 'Justfile'
+      - 'justfile'
+
+config:
+  - changed-files:
+    - any-glob-to-any-file:
+      - '*.yml'
+      - '*.yaml'
+      - '*.toml'
+      - '*.json'
+      - '.gitignore'
+
+dependencies:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'Cargo.lock'
+      - 'Cargo.toml'
