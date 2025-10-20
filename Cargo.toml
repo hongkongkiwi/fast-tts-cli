@@ -44,7 +44,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "deflate", "rustls-tls"] }
-tokio = { version = "1.39", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.48", features = ["rt-multi-thread", "macros"] }
 base64 = "0.22"
 jsonwebtoken = "9"
 dirs = "6"
@@ -54,7 +54,7 @@ aws-sdk-polly = { version = "1", optional = true }
 
 # Optional MCP Server SDK (only compiled with `--features mcp`)
 mcp-server = { version = "0.1.0", optional = true }
-axum = { version = "0.7", optional = true }
+axum = { version = "0.8", optional = true }
 tokio-stream = { version = "0.1", optional = true }
 mcp-spec = { version = "0.1.0", optional = true }
 futures = { version = "0.3", optional = true }
@@ -63,6 +63,6 @@ tower-service = { version = "0.3", optional = true }
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"
-httpmock = "0.7"
-tempfile = "3.10"
+httpmock = "0.8"
+tempfile = "3.23"
 pretty_assertions = "1.4"
