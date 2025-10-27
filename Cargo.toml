@@ -46,7 +46,7 @@ serde_yaml = "0.9"
 reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "deflate", "rustls-tls"] }
 tokio = { version = "1.39", features = ["rt-multi-thread", "macros"] }
 base64 = "0.22"
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 dirs = "6"
 htmlescape = "0.3"
 aws-config = { version = "1", optional = true }
