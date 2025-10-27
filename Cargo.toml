@@ -63,6 +63,6 @@ tower-service = { version = "0.3", optional = true }
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"
-httpmock = "0.7"
+httpmock = "0.8"
 tempfile = "3.10"
 pretty_assertions = "1.4"
